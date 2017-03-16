@@ -7,6 +7,14 @@ import datetime
 import time
 import sqlite3
 import threading
+from geopy.distance import great_circle
+
+
+#####################################################
+## Declara as definicoes
+#####################################################
+
+DISTANCIA_MAXIMA_ACEITAVEL = 30
 
 
 #####################################################
@@ -17,6 +25,7 @@ flagGravaBD = False
 flagConsultaUltimaDataBD = False
 flagEmailAtualizadoDia = False
 countEventos = 0
+flagVerificaEmail = False
 
 eventoRecebido = {}
 dataHoraRecebida = {}
@@ -24,6 +33,9 @@ valorRecebido = {}
 emailRecebido = {}
 trnIdRecebido = {}
 latLongRecebida = {}
+
+idMaquina = ''
+posicaoMaquina = ''
 
 
 #####################################################
@@ -50,7 +62,32 @@ class threadCapturaEmail(threading.Thread):
 		
 	def run(self):
 		CapturaEmail()
+		
+		
+#####################################################
+## Classe que inicia a thread de envio de email
+#####################################################
 
+class threadEnviaEmail(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		self.name = 'EnviaEmailThread'
+		
+	def run(self):
+		EnviaEmail()
+		
+		
+#####################################################
+## Classe que inicia a thread de tratamento de pedido
+#####################################################
+
+class threadTrataPedido(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		self.name = 'TrataPedidoThread'
+		
+	def run(self):
+		TrataPedido()
 
 
 #######################################################
@@ -63,18 +100,73 @@ def TrataBD():
 	global ultimaDataBD
 	global diaConsultaEmail
 	global countEventos
+	global flagVerificaEmail
 	
 	global eventoRecebido
 	global dataHoraRecebida
 	global valorRecebido
 	global emailRecebido
 	global trnIdRecebido
+	global latLongRecebida
+	
+	global idMaquina
+	global posicaoMaquina
 	
 	valorRecebidoTemp = {}
 	saldoAtual = {}
 	
 	print('Inicia thread de tratamento do BD')
 	
+	# Cria o banco
+	connection = sqlite3.connect('AutoBeer.db')
+	c = connection.cursor()
+
+	# Cria a tabela de Id da maquina
+	c.execute('''CREATE TABLE IF NOT EXISTS InfosMaquina(Id varchar, Posicao varchar, UltimaAtualizacao varchar, Email varchar)''')
+	
+	# Seleciona o campo de Id da maquina
+	c.execute('''select Id from InfosMaquina order by UltimaAtualizacao''')
+	
+	# Carrega o valor de Id da maquina
+	idMaquina = c.fetchall()
+	idMaquina = idMaquina[len(idMaquina)-1]
+	idMaquina = idMaquina[0]
+	
+	# Verifica se nao tem dados na tabela ainda
+	if(idMaquina == None):
+		# Solicita no teminal o cadastro de Id da maquina
+		idMaquina = input("\nDigite o ID (numerico) desta maquina para cadastra-lo:\n\n")
+		
+		# Insere no BD
+		c.execute('''INSERT INTO InfosMaquina values(?,"","","Cadastro")''', idMaquina)
+		
+		# Commit
+		connection.commit()
+		
+	print('\nMaquina batizada com o ID "%s"' % idMaquina)
+		
+	# Seleciona o campo de localizacao da maquina
+	c.execute('''select Posicao from InfosMaquina order by UltimaAtualizacao''')
+	
+	# Carrega o valor da localizacao da maquina
+	posicaoMaquina = c.fetchall()
+	posicaoMaquina = posicaoMaquina[len(posicaoMaquina)-1]
+	posicaoMaquina = posicaoMaquina[0]
+	
+	# Verifica se nao tem dados na posicao ainda
+	if(posicaoMaquina == ''):
+		print('Maquina sem localizacao GPS cadastrada ainda...\n')
+		
+	else:
+		print('Maquina batizada com a localizacao "%s"\n' % posicaoMaquina)
+	
+	# Encerra a conexao
+	connection.close()
+	
+	# Seta a flag que habilita a leitura de emails
+	flagVerificaEmail = True
+	
+	# Loop
 	while(True):
 		# Verifica se precisa gravar no BD
 		if(flagGravaBD == True):
@@ -84,7 +176,7 @@ def TrataBD():
 			connection = sqlite3.connect('AutoBeer.db')
 			c = connection.cursor()
 
-			# Cria a tabela de relatorio geral
+			# Cria a tabela de cadastro
 			c.execute('''CREATE TABLE IF NOT EXISTS Cadastro(Email varchar, UltimoEvento varchar, ValorOperacao varchar, Saldo varchar, UltimaAtualizacao varchar, UltimoIdTRN varchar)''')
 
 			# Varre todos os eventos a serem gravados
@@ -140,25 +232,81 @@ def TrataBD():
 					# Faz o parse do valor
 					valorRecebidoTemp[countGravaEvento] = str(valorRecebido[countGravaEvento].replace(',', '.'))
 					
-					# Verifica se e um cliente novo
-					if((ultimoSaldo == None) or (ast.literal_eval(ultimoSaldo[0]) < ast.literal_eval(valorRecebidoTemp[countGravaEvento]))):
-						print('Saldo nao disponivel...')
-					
-					else:
-						print('Atualiza cliente')
-						print('Gravando data/hora: %s' % dataHoraRecebida[countGravaEvento])
-						print('Gravando valor: %s' % valorRecebidoTemp[countGravaEvento])
-						print('Gravando email: %s' % emailRecebido[countGravaEvento])
-						print('Gravando ID transacao: %s' % trnIdRecebido[countGravaEvento])
+					# Verifica se nao e DUMP
+					if(emailRecebido[countGravaEvento] != 'DUMP'):
+						# Verifica se e um cliente novo
+						if((ultimoSaldo == None) or (ast.literal_eval(ultimoSaldo[0]) < ast.literal_eval(valorRecebidoTemp[countGravaEvento]))):
+							print('Saldo nao disponivel ou cliente nao cadastrado...')
+							
+							# Simula dump
+							emailRecebido[countGravaEvento] = 'DUMP'
+							valorRecebido[countGravaEvento] = '0.00'
+							trnIdRecebido[countGravaEvento] = ''
+							ultimoSaldo = '0.00'
 						
-						# Atualiza o saldo
-						saldoAtual[countGravaEvento] = str(ast.literal_eval(ultimoSaldo[0]) - ast.literal_eval(valorRecebidoTemp[countGravaEvento]))
-						
-						# Atualiza no BD
-						c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido[countGravaEvento]), (eventoRecebido[countGravaEvento], valorRecebidoTemp[countGravaEvento], saldoAtual[countGravaEvento], dataHoraRecebida[countGravaEvento], trnIdRecebido[countGravaEvento]))
+						else:
+							print('Atualiza cliente')
+							print('Gravando data/hora: %s' % dataHoraRecebida[countGravaEvento])
+							print('Gravando valor: %s' % valorRecebidoTemp[countGravaEvento])
+							print('Gravando email: %s' % emailRecebido[countGravaEvento])
+							print('Gravando ID transacao: %s' % trnIdRecebido[countGravaEvento])
+							
+							# Atualiza o saldo
+							saldoAtual[countGravaEvento] = str(ast.literal_eval(ultimoSaldo[0]) - ast.literal_eval(valorRecebidoTemp[countGravaEvento]))
+							
+							# Atualiza no BD
+							c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido[countGravaEvento]), (eventoRecebido[countGravaEvento], valorRecebidoTemp[countGravaEvento], saldoAtual[countGravaEvento], dataHoraRecebida[countGravaEvento], trnIdRecebido[countGravaEvento]))
 
+							# Commit
+							connection.commit()
+
+					# Verifica se e DUMP
+					if(emailRecebido[countGravaEvento] == 'DUMP'):
+						# Verifica se e um cliente novo
+						if(ultimoSaldo == None):
+							print('Cadastra DUMP')
+							print('Gravando data/hora: %s' % dataHoraRecebida[countGravaEvento])
+							print('Gravando valor: %s' % valorRecebidoTemp[countGravaEvento])
+							print('Gravando email: %s' % emailRecebido[countGravaEvento])
+							print('Gravando ID transacao: %s' % trnIdRecebido[countGravaEvento])
+							
+							# Insere no BD
+							c.execute('''INSERT INTO Cadastro values(?,?,?,?,?,?)''', (emailRecebido[countGravaEvento], eventoRecebido[countGravaEvento], valorRecebidoTemp[countGravaEvento], valorRecebidoTemp[countGravaEvento], dataHoraRecebida[countGravaEvento], trnIdRecebido[countGravaEvento]))
+						
+						else:
+							print('Atualiza DUMP')
+							print('Gravando data/hora: %s' % dataHoraRecebida[countGravaEvento])
+							print('Gravando valor: %s' % valorRecebidoTemp[countGravaEvento])
+							print('Gravando email: %s' % emailRecebido[countGravaEvento])
+							print('Gravando ID transacao: %s' % trnIdRecebido[countGravaEvento])
+							
+							# Atualiza o saldo
+							saldoAtual[countGravaEvento] = '0.00'
+							
+							# Atualiza no BD
+							c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido[countGravaEvento]), (eventoRecebido[countGravaEvento], valorRecebidoTemp[countGravaEvento], saldoAtual[countGravaEvento], dataHoraRecebida[countGravaEvento], trnIdRecebido[countGravaEvento]))
+						
+						# Commit
+						connection.commit()
+
+				# Verifica se e um evento de gravacao de posicao de maquina
+				elif(eventoRecebido[countGravaEvento] == 'GravaPosicao'):
+					print('\nGravando localizacao da maquina...')
+					
+					print('Cadastra localizacao de maquina')
+					print('Gravando id da maquina: %s' % idMaquina)
+					print('Gravando localizacao da maquina: %s' % latLongRecebida[countGravaEvento])
+					print('Gravando data/hora: %s' % dataHoraRecebida[countGravaEvento])
+					print('Gravando email: %s' % emailRecebido[countGravaEvento])
+					
+					# Insere no BD
+					c.execute('''INSERT INTO InfosMaquina values(?,?,?,?)''', (idMaquina, latLongRecebida[countGravaEvento], dataHoraRecebida[countGravaEvento], emailRecebido[countGravaEvento]))
+					
 					# Commit
 					connection.commit()
+					
+					# Grava a posicao na variavel global
+					posicaoMaquina = latLongRecebida[countGravaEvento]
 					
 			# Encerra a conexao
 			connection.close()
@@ -174,28 +322,67 @@ def TrataBD():
 			connection = sqlite3.connect('AutoBeer.db')
 			c = connection.cursor()
 
-			# Cria a tabela de relatorio geral
+			# Cria a tabela de cadastro
 			c.execute('''CREATE TABLE IF NOT EXISTS Cadastro (Email varchar, UltimoEvento varchar, ValorOperacao varchar, Saldo varchar, UltimaAtualizacao varchar, UltimoIdTRN varchar)''')
 			
 			# Seleciona o campo de ultima data/hora de atualizacao
 			c.execute('''select UltimaAtualizacao from Cadastro order by UltimaAtualizacao''')
 			
-			# Carrega o valor de ultimo saldo
+			# Carrega o valor de ultima data/hora
 			ultimaDataBD = c.fetchall()
 			
 			# Verifica se o BD esta vazio
 			if(len(ultimaDataBD) == 0):
 				# Assume uma data incial
 				ultimaDataBD = '01-Jan-2017 00:00:00'
-				diaConsultaEmail = ultimaDataBD[0:11]
 				
 			else:
 				# Carrega a ultima data do BD
 				ultimaDataBD = ultimaDataBD[len(ultimaDataBD)-1]
 				ultimaDataBD = ultimaDataBD[0]
+				
+			# Cria a tabela de Id da maquina
+			c.execute('''CREATE TABLE IF NOT EXISTS InfosMaquina(Id varchar, Posicao varchar, UltimaAtualizacao varchar, Email varchar)''')
+			
+			# Seleciona o campo de ultima data/hora de atualizacao
+			c.execute('''select UltimaAtualizacao from InfosMaquina order by UltimaAtualizacao''')
+			
+			# Carrega o valor de ultima data/hora
+			ultimaDataBDTab2 = c.fetchall()
+			
+			# Verifica se o BD esta vazio
+			if(len(ultimaDataBDTab2) == 1):
+				# Assume uma data incial
+				ultimaDataBDTab2 = '01-Jan-2017 00:00:00'
+				
+			else:
+				# Carrega a ultima data do BD
+				ultimaDataBDTab2 = ultimaDataBDTab2[len(ultimaDataBDTab2)-1]
+				ultimaDataBDTab2 = ultimaDataBDTab2[0]			
+			
+			# Converte a ultima data/hora do BD em timestamp para comparacao
+			d = datetime.datetime.strptime(ultimaDataBD, '%d-%b-%Y %H:%M:%S')
+			ultimaDataBDTimestampTemp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+			
+			# Converte a ultima data/hora do BD em timestamp para comparacao
+			d = datetime.datetime.strptime(ultimaDataBDTab2, '%d-%b-%Y %H:%M:%S')
+			ultimaDataBDTimestampTempTab2 = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+				
+			# Verifica se a ultima data/hora da tabela 2 e maior que da tabela 1
+			if(ultimaDataBDTimestampTemp < ultimaDataBDTimestampTempTab2):
+				# Carrega o valor de ultima data/hora
+				ultimaDataBD = ultimaDataBDTab2
+				
+			# Verifica se ainda nao tem registros salvos
+			if(ultimaDataBD == '01-Jan-2017 00:00:00'):
+				# Salva a data inicial
+				diaConsultaEmail = ultimaDataBD[0:11]
+				
+			else:
+				# Salva a data atual
 				diaConsultaEmail = datetime.datetime.now().strftime("%d-%b-%Y")
 			
-			print('\n[%s] Ultima data BD - %s' % (datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"), ultimaDataBD))
+			print('\n[%s] Ultima data BD: %s - Local maquina: %s' % (datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"), ultimaDataBD, posicaoMaquina))
 			
 			# Encerra a conexao
 			connection.close()
@@ -214,6 +401,7 @@ def CapturaEmail():
 	global ultimaDataBD
 	global diaConsultaEmail
 	global countEventos
+	global flagVerificaEmail
 	
 	global eventoRecebido
 	global dataHoraRecebida
@@ -221,6 +409,9 @@ def CapturaEmail():
 	global emailRecebido
 	global trnIdRecebido
 	global latLongRecebida
+	
+	global idMaquina
+	global posicaoMaquina
 	
 	print('Inicia thread de captura de email')
 	
@@ -252,8 +443,8 @@ def CapturaEmail():
 		# Aguarda 2 segundos
 		time.sleep(2)
 		
-		# Verifica se nao tem eventos para consumo do BD na fila
-		if(countEventos == 0):
+		# Verifica se nao tem eventos para consumo do BD na fila e se pode verificar os emails
+		if((countEventos == 0) and (flagVerificaEmail == True)):
 			# Aguarda a ultima data do BD
 			flagConsultaUltimaDataBD = True
 			while(flagConsultaUltimaDataBD == True):
@@ -337,7 +528,7 @@ def CapturaEmail():
 								# Incrementa o contador
 								countEventos += 1
 
-						elif('Button pressed' in mail['subject']):
+						elif('Solicita pedido' in mail['subject']):
 							if part.get_content_type() == 'text/plain':
 								# Salva como evento de pedido
 								eventoRecebido[countEventos] = 'Pedido'
@@ -356,24 +547,80 @@ def CapturaEmail():
 								# Varre todas as palavras
 								for posicaoPalavra in range(len(textoRecebido)):
 									# Verifica se encontrou no email a LAT/LONG
-									if(('-' in textoRecebido[posicaoPalavra]) and (flagCorpoEmail == False)):
-										# Seta a flag e salva o valor
+									if(('-2' in textoRecebido[posicaoPalavra]) and (flagCorpoEmail == False)):
+										# Seta a flag e salva o local
 										flagCorpoEmail = True
 										latLongRecebida[countEventos] = textoRecebido[posicaoPalavra] + ' ' + textoRecebido[posicaoPalavra+1]
+										
+										# Carrega o status da proximidade entre os pontos
+										statusDistanciaPedido = VerificaProximidade(posicaoMaquina, latLongRecebida[countEventos], DISTANCIA_MAXIMA_ACEITAVEL)
 									
-								# Salva o valor (inicialmente somente R$7,00)
-								valorRecebido[countEventos] = '7,00'
+								# Verifica se deve gravar um "DUMP" no BD
+								if(statusDistanciaPedido == False):
+									# Salva o valor dump
+									valorRecebido[countEventos] = '0,00'
+										
+									# Salva o email dump
+									emailRecebido[countEventos] = 'DUMP'
 									
-								# Salva o remetente do pedido
-								emailRecebido[countEventos] = mail['from']
-								
-								# Salva o ID da transacao
-								trnIdRecebido[countEventos] = ''
-								
-								print('Chegou %s de %s no valor de R$%s para %s' % (eventoRecebido[countEventos], emailRecebido[countEventos], valorRecebido[countEventos], latLongRecebida[countEventos]))
-								
+									# Salva o ID da transacao
+									trnIdRecebido[countEventos] = ''
+									
+								else:									
+									# Salva o valor (inicialmente somente R$7,00)
+									valorRecebido[countEventos] = '7,00'
+										
+									# Salva o remetente do pedido
+									emailRecebido[countEventos] = mail['from']
+									
+									# Salva o ID da transacao
+									trnIdRecebido[countEventos] = ''
+									
 								# Incrementa o contador
 								countEventos += 1
+								
+						elif('Grava local' in mail['subject']):
+							if part.get_content_type() == 'text/plain':
+								# Salva como evento de pedido
+								eventoRecebido[countEventos] = 'GravaPosicao'
+								
+								# Faz o parse da data/hora do email para gravacao no BD
+								dataHoraRecebidaTemp = mail['date'].split()
+								dataHoraRecebida[countEventos] = dataHoraRecebidaTemp[1] + '-' + dataHoraRecebidaTemp[2] + '-' + dataHoraRecebidaTemp[3] + ' ' + dataHoraRecebidaTemp[4]
+											
+								# Zera a flag e carrega o payload do email
+								flagCorpoEmail = False
+								body = part.get_payload(decode=False)
+								
+								# Separa o texto do conteudo do email
+								textoRecebido = body.split()
+								
+								# Varre todas as palavras
+								for posicaoPalavra in range(len(textoRecebido)):
+									# Verifica se encontrou no email a LAT/LONG
+									if(('-' in textoRecebido[posicaoPalavra]) and (flagCorpoEmail == False)):
+										# Seta a flag e salva o local
+										flagCorpoEmail = True
+										latLongRecebida[countEventos] = textoRecebido[posicaoPalavra] + ' ' + textoRecebido[posicaoPalavra+1]
+										
+									# Verifica se encontrou o ID da maquina	
+									elif(textoRecebido[posicaoPalavra] == 'Maquina'):
+										# Verifica se a mensagem e para esta maquina
+										if(textoRecebido[posicaoPalavra+1] == idMaquina):
+											# Seta a flag de incremento de evento na fila
+											flagGravaLocalMaquina = True
+										
+										else:
+											# Reseta a flag de incremento de evento na fila
+											flagGravaLocalMaquina = False
+									
+								# Salva o remetente da gravacao
+								emailRecebido[countEventos] = mail['from']
+								
+								# Verifica se e para incrementar a fila de eventos
+								if(flagGravaLocalMaquina == True):
+									# Incrementa o contador
+									countEventos += 1
 												
 						'''if bool(fileName):
 							filePath = os.path.join(detach_dir, 'attachments1', fileName)
@@ -395,6 +642,58 @@ def CapturaEmail():
 		print('Erro geral na tratativa de recepcao de email!')'''
 
 
+#######################################################
+## Funcao que trata o envio de emails
+#######################################################		
+
+def EnviaEmail():
+	# Loop
+	while(True):
+		continue
+		
+		
+#######################################################
+## Funcao que trata os pedidos
+#######################################################		
+
+def TrataPedido():
+	# Loop
+	while(True):
+		continue
+
+
+##############################################################
+## Funcao que retorna o status da distancia entre dois pontos
+##############################################################
+
+def VerificaProximidade(posicao1, posicao2, distancia):
+	# Verifica se nao tem a posicao
+	if((posicao1 == '') or (posicao1 == '-- --')):
+		# Carrega valor default
+		posicao1 = '0.000000 0.0000000'
+		
+	# Verifica se nao tem a posicao
+	if((posicao2 == '') or (posicao1 == '-- --')):
+		# Carrega valor default
+		posicao2 = '0.000000 0.0000000'
+	
+	# Ajusta o formato da lat/long
+	posicao1Parse = posicao1.replace(' ', ', ')
+	posicao2Parse = posicao2.replace(' ', ', ')
+	
+	# Carrega a distancia entre os pontos
+	distanciaMedida = int(great_circle(posicao1Parse, posicao2Parse).meters)
+	
+	print('\nEsta a %d metros da maquina\n' % distanciaMedida)
+	
+	# Verifica se esta no raio configurado
+	if(distanciaMedida > distancia):
+		return False
+		
+	else:
+		return True
+
+
 ##########################################
 ## Main
 ##########################################
@@ -404,6 +703,13 @@ print('\n[%s] AutoBeer 2017\n' % datetime.datetime.now().strftime("%d/%m/%Y %H:%
 # Inicia as threads
 CapturaEmailThread = threadCapturaEmail()
 CapturaEmailThread.start()
+
 TrataBDThread = threadTrataBD()
 TrataBDThread.start()
+
+EnviaEmailThread = threadEnviaEmail()
+EnviaEmailThread.start()
+
+TrataPedidoThread = threadTrataPedido()
+TrataPedidoThread.start()
 
