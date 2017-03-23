@@ -1,5 +1,6 @@
 import ast
 import email
+from email.utils import parsedate_tz, mktime_tz, formatdate
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import getpass, imaplib
@@ -11,13 +12,46 @@ import time
 import sqlite3
 import threading
 from geopy.distance import great_circle
+import RPi.GPIO as gpio
 
 
 #####################################################
 ## Declara as definicoes
 #####################################################
 
+# Geral
 DISTANCIA_MAXIMA_ACEITAVEL = 30
+TEMPO_MINIMO_ENVIO_EMAIL = 60
+PULSOS_500ML = 100
+
+# Pinagem
+PINO_ACENDE_LED = 7
+PINO_CONTROLE_BOMBA = 11
+PINO_BOTAO = 13
+PINO_SENSOR_FLUXO = 15
+
+# Maquina de estado geral
+ESTADO_INICIO = 0
+VERIFICA_BOTAO = 1
+VERIFICA_FLUXO = 2
+ESTADO_FINAL = 3
+
+# Maquina de estado do led
+DESLIGA_LED = 0
+LIGA_LED = 1
+PISCA_LED = 2
+
+# Maquina de estado da bomba
+DESLIGA_BOMBA = 0
+LIGA_BOMBA = 1
+
+# Maquina de estado do botao
+BOTAO_DESACIONADO = 0
+BOTAO_ACIONADO = 1
+
+# Maquina de estado do sensor de fluxo
+PARA_CARGA = 0
+LIBERA_CARGA = 1
 
 
 #####################################################
@@ -30,6 +64,8 @@ flagEmailAtualizadoDia = False
 flagVerificaEmail = False
 flagEnviaEmail = False
 flagAcionaAutomacao = False
+contadorPulsosSensorFluxo = 0
+flagPulsoSensorFluxo = False
 
 eventoRecebido = ''
 dataHoraRecebida = ''
@@ -234,6 +270,9 @@ def TrataBD():
 				# Commit
 				connection.commit()
 				
+				# Seta a flag
+				flagVerificaEmail = True
+
 			# Verifica se e um evento de carga
 			elif(eventoRecebido == 'Pedido'):
 				print('\nGravando evento de pedido...')
@@ -283,6 +322,9 @@ def TrataBD():
 
 						# Seta a flag
 						flagClienteProximoMaquina = True
+						
+						# Seta a flag
+						flagVerificaEmail = True
 					
 					else:
 						print('Atualiza cliente')
@@ -302,12 +344,28 @@ def TrataBD():
 						
 						# Carrega o texto para enviar o email
 						textoEnviaMsg = 'Parabens, seu pedido de ' + dataHoraRecebida + ' foi processado com sucesso!\n\nSeu saldo disponivel e: R$ ' + saldoAtual
-
-						# Seta a flag de Envio de email
-						flagEnviaEmail = True
 						
-						# Seta a flag de tratamento da automacao
-						flagAcionaAutomacao = True
+						# Carrega os timestamps para comparacao
+						d = datetime.datetime.strptime(dataHoraRecebida, '%d-%b-%Y %H:%M:%S')
+						dataHoraRecebidaTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+						
+						d = datetime.datetime.now().strftime('%d-%b-%Y %H:%M:%S')
+						dataHoraAtualTimestamp = time.mktime(datetime.datetime.strptime(d, '%d-%b-%Y %H:%M:%S').timetuple())
+						
+						# Verifica se deve tomar acao (envio de email e liberacao da automacao) ou somente gravar no BD
+						if((dataHoraAtualTimestamp - dataHoraRecebidaTimestamp) < TEMPO_MINIMO_ENVIO_EMAIL):
+							# Seta a flag de Envio de email
+							flagEnviaEmail = True
+							
+							# Seta a flag de tratamento da automacao
+							flagAcionaAutomacao = True
+							
+							# Reseta a flag
+							flagVerificaEmail = False
+							
+						else:
+							# Seta a flag
+							flagVerificaEmail = True
 
 				# Verifica se e DUMP (fora da zona de pedido da maquina)
 				if(emailRecebido == 'DUMP'):
@@ -321,7 +379,7 @@ def TrataBD():
 						
 						# Insere no BD
 						c.execute('''INSERT INTO Cadastro values(?,?,?,?,?,?)''', (emailRecebido, eventoRecebido, valorRecebidoTemp, valorRecebidoTemp, dataHoraRecebida, trnIdRecebido))
-					
+
 					else:
 						print('Atualiza DUMP')
 						print('Gravando data/hora: %s' % dataHoraRecebida)
@@ -331,7 +389,7 @@ def TrataBD():
 						
 						# Atualiza no BD
 						c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = "0.00", UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido), (eventoRecebido, valorRecebidoTemp, dataHoraRecebida, trnIdRecebido))
-					
+
 					# Commit
 					connection.commit()
 					
@@ -347,9 +405,21 @@ def TrataBD():
 						# Carrega o texto para enviar o email
 						textoEnviaMsg = 'Desculpem-nos, mas nao foi possivel atender ao pedido solicitado em ' + dataHoraRecebida + '!\n\nSeu pedido foi realizado fora da distancia minima (' + str(DISTANCIA_MAXIMA_ACEITAVEL) + ' metros) de alguma maquina'
 
-					# Seta a flag de Envio de email
-					flagEnviaEmail = True
+					# Carrega os timestamps para comparacao
+					d = datetime.datetime.strptime(dataHoraRecebida, '%d-%b-%Y %H:%M:%S')
+					dataHoraRecebidaTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+					
+					d = datetime.datetime.now().strftime('%d-%b-%Y %H:%M:%S')
+					dataHoraAtualTimestamp = time.mktime(datetime.datetime.strptime(d, '%d-%b-%Y %H:%M:%S').timetuple())
 
+					# Verifica se deve tomar acao (envio de email) ou somente gravar no BD
+					if((dataHoraAtualTimestamp - dataHoraRecebidaTimestamp) < TEMPO_MINIMO_ENVIO_EMAIL):
+						# Seta a flag de Envio de email
+						flagEnviaEmail = True
+						
+					# Seta a flag
+					flagVerificaEmail = True
+						
 			# Verifica se e um evento de gravacao de posicao de maquina
 			elif(eventoRecebido == 'GravaPosicao'):
 				print('\nGravando localizacao da maquina...')
@@ -368,12 +438,12 @@ def TrataBD():
 				
 				# Grava a posicao na variavel global
 				posicaoMaquina = latLongRecebida
-					
+				
+				# Seta a flag
+				flagVerificaEmail = True
+
 			# Encerra a conexao
 			connection.close()
-			
-			# Seta a flag
-			flagVerificaEmail = True
 			
 			# Reseta a flag
 			flagGravaBD = False
@@ -397,10 +467,17 @@ def TrataBD():
 				# Assume uma data incial
 				ultimaDataBD = '01-Jan-2017 00:00:00'
 				
+				# Converte a ultima data/hora do BD em timestamp para comparacao
+				ultimaDataBDTimestampTemp = time.mktime(datetime.datetime.strptime(ultimaDataBD, '%d-%b-%Y %H:%M:%S').timetuple())
+				
 			else:
 				# Carrega a ultima data do BD
 				ultimaDataBD = ultimaDataBD[len(ultimaDataBD)-1]
 				ultimaDataBD = ultimaDataBD[0]
+				
+				# Converte a ultima data/hora do BD em timestamp para comparacao
+				d = datetime.datetime.strptime(ultimaDataBD, '%d-%b-%Y %H:%M:%S')
+				ultimaDataBDTimestampTemp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
 				
 			# Cria a tabela de Id da maquina
 			c.execute('''CREATE TABLE IF NOT EXISTS InfosMaquina(Id varchar, Posicao varchar, UltimaAtualizacao varchar, Email varchar)''')
@@ -416,19 +493,18 @@ def TrataBD():
 				# Assume uma data incial
 				ultimaDataBDTab2 = '01-Jan-2017 00:00:00'
 				
+				# Converte a ultima data/hora do BD em timestamp para comparacao
+				ultimaDataBDTimestampTempTab2 = time.mktime(datetime.datetime.strptime(ultimaDataBDTab2, '%d-%b-%Y %H:%M:%S').timetuple())
+				
 			else:
 				# Carrega a ultima data do BD
 				ultimaDataBDTab2 = ultimaDataBDTab2[len(ultimaDataBDTab2)-1]
-				ultimaDataBDTab2 = ultimaDataBDTab2[0]			
-			
-			# Converte a ultima data/hora do BD em timestamp para comparacao
-			d = datetime.datetime.strptime(ultimaDataBD, '%d-%b-%Y %H:%M:%S')
-			ultimaDataBDTimestampTemp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
-			
-			# Converte a ultima data/hora do BD em timestamp para comparacao
-			d = datetime.datetime.strptime(ultimaDataBDTab2, '%d-%b-%Y %H:%M:%S')
-			ultimaDataBDTimestampTempTab2 = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+				ultimaDataBDTab2 = ultimaDataBDTab2[0]
 				
+				# Converte a ultima data/hora do BD em timestamp para comparacao
+				d = datetime.datetime.strptime(ultimaDataBDTab2, '%d-%b-%Y %H:%M:%S')
+				ultimaDataBDTimestampTempTab2 = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+
 			# Verifica se a ultima data/hora da tabela 2 e maior que da tabela 1
 			if(ultimaDataBDTimestampTemp < ultimaDataBDTimestampTempTab2):
 				# Carrega o valor de ultima data/hora
@@ -481,10 +557,6 @@ def CapturaEmail():
 	# Reseta a flag
 	flagCorpoEmail = False
 	
-	detach_dir = '.'
-	'''if 'attachments1' not in os.listdir(detach_dir):
-		os.mkdir('attachments1')'''
-
 	# Usuario e senha do email a conectar
 	userName = 'autobeer2017'
 	passwd = 'B-yxxSY3_z'
@@ -542,7 +614,9 @@ def CapturaEmail():
 				ultimaDataBDTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
 				
 				# Converte a ultima data/hora do email em timestamp para comparacao
-				dataHoraRecebidaTempTimestamp = mail['date'].split()
+				dataHoraRecebidaTempTimestamp = mail['date'].replace('0000','0300')
+				tt = parsedate_tz(dataHoraRecebidaTempTimestamp)
+				dataHoraRecebidaTempTimestamp = formatdate(mktime_tz(tt)).split()
 				dataHoraRecebidaTimestamp = dataHoraRecebidaTempTimestamp[1] + '-' + dataHoraRecebidaTempTimestamp[2] + '-' + dataHoraRecebidaTempTimestamp[3] + ' ' + dataHoraRecebidaTempTimestamp[4]
 				d = datetime.datetime.strptime(dataHoraRecebidaTimestamp, '%d-%b-%Y %H:%M:%S')
 				dataHoraRecebidaTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
@@ -561,7 +635,9 @@ def CapturaEmail():
 								eventoRecebido = 'Carga'
 								
 								# Faz o parse da data/hora do email para gravacao no BD
-								dataHoraRecebidaTemp = mail['date'].split()
+								dataHoraRecebidaTemp = mail['date'].replace('0000','0300')
+								tt = parsedate_tz(dataHoraRecebidaTemp)
+								dataHoraRecebidaTemp = formatdate(mktime_tz(tt)).split()
 								dataHoraRecebida = dataHoraRecebidaTemp[1] + '-' + dataHoraRecebidaTemp[2] + '-' + dataHoraRecebidaTemp[3] + ' ' + dataHoraRecebidaTemp[4]
 								
 								# Zera a flag e carrega o payload do email
@@ -599,7 +675,9 @@ def CapturaEmail():
 								eventoRecebido = 'Pedido'
 								
 								# Faz o parse da data/hora do email para gravacao no BD
-								dataHoraRecebidaTemp = mail['date'].split()
+								dataHoraRecebidaTemp = mail['date'].replace('0000','0300')
+								tt = parsedate_tz(dataHoraRecebidaTemp)
+								dataHoraRecebidaTemp = formatdate(mktime_tz(tt)).split()
 								dataHoraRecebida = dataHoraRecebidaTemp[1] + '-' + dataHoraRecebidaTemp[2] + '-' + dataHoraRecebidaTemp[3] + ' ' + dataHoraRecebidaTemp[4]
 									
 								# Zera a flag e carrega o payload do email
@@ -627,6 +705,12 @@ def CapturaEmail():
 									
 									# Salva o email origem
 									emailEnviaMsg = mail['from']
+									textoEmailEnviaMsg = emailEnviaMsg.split()
+									for posicaoEmail in range(len(textoEmailEnviaMsg)):
+										if('@' in textoEmailEnviaMsg[posicaoEmail]):
+											emailEnviaMsg = textoEmailEnviaMsg[posicaoEmail]
+											emailEnviaMsg = emailEnviaMsg.replace('<','')
+											emailEnviaMsg = emailEnviaMsg.replace('>','')
 									
 									# Salva o email dump
 									emailRecebido = 'DUMP'
@@ -640,9 +724,21 @@ def CapturaEmail():
 										
 									# Salva o remetente do pedido
 									emailRecebido = mail['from']
+									textoEmailRecebido = emailRecebido.split()
+									for posicaoEmailRecebido in range(len(textoEmailRecebido)):
+										if('@' in textoEmailRecebido[posicaoEmailRecebido]):
+											emailRecebido = textoEmailRecebido[posicaoEmailRecebido]
+											emailRecebido = emailRecebido.replace('<','')
+											emailRecebido = emailRecebido.replace('>','')
 									
 									# Salva o email origem
 									emailEnviaMsg = mail['from']
+									textoEmailEnviaMsg = emailEnviaMsg.split()
+									for posicaoEmail in range(len(textoEmailEnviaMsg)):
+										if('@' in textoEmailEnviaMsg[posicaoEmail]):
+											emailEnviaMsg = textoEmailEnviaMsg[posicaoEmail]
+											emailEnviaMsg = emailEnviaMsg.replace('<','')
+											emailEnviaMsg = emailEnviaMsg.replace('>','')
 									
 									# Salva o ID da transacao
 									trnIdRecebido = ''
@@ -657,7 +753,9 @@ def CapturaEmail():
 								eventoRecebido = 'GravaPosicao'
 								
 								# Faz o parse da data/hora do email para gravacao no BD
-								dataHoraRecebidaTemp = mail['date'].split()
+								dataHoraRecebidaTemp = mail['date'].replace('0000','0300')
+								tt = parsedate_tz(dataHoraRecebidaTemp)
+								dataHoraRecebidaTemp = formatdate(mktime_tz(tt)).split()
 								dataHoraRecebida = dataHoraRecebidaTemp[1] + '-' + dataHoraRecebidaTemp[2] + '-' + dataHoraRecebidaTemp[3] + ' ' + dataHoraRecebidaTemp[4]
 											
 								# Zera a flag e carrega o payload do email
@@ -694,14 +792,6 @@ def CapturaEmail():
 									# Ajusta as flags
 									flagVerificaEmail = False
 									flagGravaBD = True
-												
-						'''if bool(fileName):
-							filePath = os.path.join(detach_dir, 'attachments1', fileName)
-							if not os.path.isfile(filePath) :
-								print('\nAnexos:')
-								fp = open(filePath, 'wb')
-								fp.write(part.get_payload(decode=True))
-								fp.close()'''
 	
 	# Encerra a sessao
 	imapSession.close()
@@ -773,6 +863,13 @@ def EnviaEmail():
 
 def TrataPedido():
 	global flagAcionaAutomacao
+	global contadorPulsosSensorFluxo
+	global flagPulsoSensorFluxo
+	
+	# Inicializa os estados
+	estadoGeral = ESTADO_INICIO
+	estadoLed = DESLIGA_LED
+	estadoBomba = DESLIGA_BOMBA
 	
 	print('Inicia thread de tratamento da automacao')
 	
@@ -782,8 +879,168 @@ def TrataPedido():
 		if(flagAcionaAutomacao == True):
 			print('\nLiberando automacao...')
 			
-			# Reseta a flag
-			flagAcionaAutomacao = False
+			# Verifica o estado da maquina geral
+			if(estadoGeral == ESTADO_INICIO):
+				print('PISCA O LED')
+				print('DESLIGA A BOMBA')
+				print('BOTAO DESACIONADO')
+				
+				# Ajusta os estados
+				estadoLed = PISCA_LED
+				estadoBomba = DESLIGA_BOMBA
+				
+				# Carrega proximo estado
+				estadoGeral = VERIFICA_BOTAO
+				
+			elif(estadoGeral == VERIFICA_BOTAO):
+				# Verifica o botao
+				if(estadoBotao == BOTAO_ACIONADO):
+					print('BOTAO ACIONADO')
+					print('ACENDE O LED')
+					print('LIGA A BOMBA')
+					print('VERIFICA O FLUXO')
+					
+					# Ajusta os estados
+					estadoLed = LIGA_LED
+					estadoBomba = LIGA_BOMBA
+					
+					# Carrega proximo estado
+					estadoGeral = VERIFICA_FLUXO
+					
+					# Zera o contador e reseta a flag
+					contadorPulsosSensorFluxo = 0
+					flagPulsoSensorFluxo = False
+					
+				elif(estadoBotao == BOTAO_DESACIONADO):
+					# Mantem o estado
+					estadoGeral = VERIFICA_BOTAO
+					
+			elif(estadoGeral == VERIFICA_FLUXO):
+				# Verifica o fluxo
+				if(estadoSensorFluxo == PARA_CARGA):
+					print('FLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
+					print('APAGA O LED')
+					print('DESLIGA A BOMBA')
+					
+					# Ajusta os estados
+					estadoLed = DESLIGA_LED
+					estadoBomba = DESLIGA_BOMBA
+					
+					# Carrega proximo estado
+					estadoGeral = ESTADO_FINAL
+					
+				elif(estadoSensorFluxo == LIBERA_CARGA):
+					print('FLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
+					
+					# Mantem o estado
+					estadoGeral = VERIFICA_FLUXO
+			
+			elif(estadoGeral == ESTADO_FINAL):
+				print('\nFinal do processo da automacao!!!')
+				
+				# Reseta a flag
+				flagAcionaAutomacao = False
+			
+				# Seta a flag
+				flagVerificaEmail = True
+				
+				# Carrega proximo estado
+				estadoGeral = ESTADO_INICIO
+
+			# Trata estado do led
+			TrataEstadoLed(estadoLed)
+			
+			# Trata estado da bomba
+			TrataEstadoBomba(estadoBomba)
+			
+			# Trata estado do botao
+			estadoBotao = TrataEstadoBotao()
+			
+			# Trata estado do sensor de fluxo
+			estadoSensorFluxo = TrataEstadoSensorFluxo()
+
+
+##############################################################
+## Funcao que trata os estados do led
+##############################################################
+
+def TrataEstadoLed(recebeEstadoLed):
+	# Verifica o estado do led
+	if(recebeEstadoLed == DESLIGA):
+		# Reseta o estado do led
+		gpio.output(PINO_ACENDE_LED, gpio.LOW)
+		
+	elif(recebeEstadoLed == LIGA):
+		# Seta o estado do led
+		gpio.output(PINO_ACENDE_LED, gpio.HIGH)
+		
+	elif(recebeEstadoLed == PISCA):
+		# Seta/Reseta o estado do led  @@
+		gpio.output(PINO_ACENDE_LED, gpio.LOW)
+
+
+##############################################################
+## Funcao que trata os estados da bomba
+##############################################################
+
+def TrataEstadoBomba(recebeEstadoBomba):
+	# Verifica o estado da bomba
+	if(recebeEstadoBomba == DESLIGA):
+		# Reseta o estado da bomba
+		gpio.output(PINO_CONTROLE_BOMBA, gpio.LOW)
+		
+	elif(recebeEstadoBomba == LIGA):
+		# Seta o estado da bomba
+		gpio.output(PINO_CONTROLE_BOMBA, gpio.HIGH)
+
+
+##############################################################
+## Funcao que trata os estados do botao
+##############################################################
+
+def TrataEstadoBotao():
+	# Verifica se o botao esta pressionado
+	if(gpio.input(PINO_BOTAO) == False):
+		# Informa o estado
+		enviaEstadoBotao = BOTAO_ACIONADO
+		
+	elif(gpio.input(PINO_BOTAO) == True):
+		# Informa o estado
+		enviaEstadoBotao = BOTAO_DESACIONADO
+	
+	return enviaEstadoBotao
+
+
+##############################################################
+## Funcao que trata os estados do sensor de fluxo
+##############################################################
+
+def TrataEstadoSensorFluxo():
+	global contadorPulsosSensorFluxo
+	global flagPulsoSensorFluxo
+	
+	# Verifica se o sensor recebeu pulso
+	if(gpio.input(PINO_SENSOR_FLUXO) == False):
+		# Seta a flag
+		flagPulsoSensorFluxo = True
+		
+	elif((gpio.input(PINO_SENSOR_FLUXO) == True) and (flagPulsoSensorFluxo == True)):
+		# Reseta a flag
+		flagPulsoSensorFluxo = False
+		
+		# Incrementa o contador
+		contadorPulsosSensorFluxo += 1
+		
+	# Verifica se ja encheu
+	if(contadorPulsosSensorFluxo >= PULSOS_500ML):
+		# Informa o estado
+		enviaEstadoSensorFluxo = PARA_CARGA
+		
+	else:
+		# Informa o estado
+		enviaEstadoSensorFluxo = LIBERA_CARGA
+		
+	return enviaEstadoSensorFluxo
 
 
 ##############################################################
@@ -818,11 +1075,33 @@ def VerificaProximidade(posicao1, posicao2, distancia):
 		return True
 
 
+##############################################################
+## Funcao que inicializa os I/Os
+##############################################################
+
+def InicializaIOs():
+	# Inicializa os GPIOs
+	gpio.setmode(gpio.BOARD)
+	gpio.setup(PINO_CONTROLE_BOMBA, gpio.OUT)
+	gpio.setup(PINO_ACENDE_LED, gpio.OUT)
+	gpio.setup(PINO_BOTAO, gpio.IN, pull_up_down = gpio.PUD_UP)
+	gpio.setup(PINO_SENSOR_FLUXO, gpio.IN, pull_up_down = gpio.PUD_UP)
+	
+	# Reseta o estado da bomba
+	gpio.output(PINO_CONTROLE_BOMBA, gpio.LOW)
+	
+	# Reseta o estado do led
+	gpio.output(PINO_ACENDE_LED, gpio.LOW)
+
+
 ##########################################
 ## Main
 ##########################################
 
 print('\n[%s] AutoBeer 2017\n' % datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+
+# Inicializa
+InicializaIOs()
 
 # Inicia as threads
 TrataBDThread = threadTrataBD()
