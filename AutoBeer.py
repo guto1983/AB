@@ -22,7 +22,9 @@ import RPi.GPIO as gpio
 # Geral
 DISTANCIA_MAXIMA_ACEITAVEL = 30
 TEMPO_MINIMO_ENVIO_EMAIL = 60
-PULSOS_500ML = 100
+PULSOS_500ML = 225
+TEMPO_BLINK_LED = 0.3
+def SetaFlagPiscaLed(): global flagPiscaLed;flagPiscaLed = True;
 
 # Pinagem
 PINO_ACENDE_LED = 7
@@ -64,8 +66,12 @@ flagEmailAtualizadoDia = False
 flagVerificaEmail = False
 flagEnviaEmail = False
 flagAcionaAutomacao = False
+flagFinalAutomacao = False
 contadorPulsosSensorFluxo = 0
 flagPulsoSensorFluxo = False
+interrupcaoTeclado = ''
+flagPiscaLed = False
+estadoPiscaLed = DESLIGA_LED
 
 eventoRecebido = ''
 dataHoraRecebida = ''
@@ -79,6 +85,19 @@ textoEnviaMsg = ''
 
 idMaquina = ''
 posicaoMaquina = ''
+
+
+#####################################################
+## Classe que inicia a thread de debug
+#####################################################
+
+class threadDebug(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		self.name = 'DebugThread'
+		
+	def run(self):
+		Debug()
 
 
 #####################################################
@@ -133,6 +152,18 @@ class threadTrataPedido(threading.Thread):
 		TrataPedido()
 
 
+#####################################################
+## Classe que inicia a thread de tratamento do sensor
+#####################################################
+class threadTrataSensorFluxo(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		self.name = 'TrataSensorFluxoThread'
+		
+	def run(self):
+		TrataSensorFluxo()
+
+
 #######################################################
 ## Funcao que trata o Banco de dados
 #######################################################		
@@ -145,6 +176,7 @@ def TrataBD():
 	global flagVerificaEmail
 	global flagEnviaEmail
 	global flagAcionaAutomacao
+	global flagFinalAutomacao
 	
 	global eventoRecebido
 	global dataHoraRecebida
@@ -327,43 +359,76 @@ def TrataBD():
 						flagVerificaEmail = True
 					
 					else:
-						print('Atualiza cliente')
-						print('Gravando data/hora: %s' % dataHoraRecebida)
-						print('Gravando valor: %s' % valorRecebidoTemp)
-						print('Gravando email: %s' % emailRecebido)
-						print('Gravando ID transacao: %s' % trnIdRecebido)
-						
-						# Atualiza o saldo
-						saldoAtual = str(ast.literal_eval(ultimoSaldo[0]) - ast.literal_eval(valorRecebidoTemp))
-						
-						# Atualiza no BD
-						c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido), (eventoRecebido, valorRecebidoTemp, saldoAtual, dataHoraRecebida, trnIdRecebido))
+						# Verifica se ainda nao efetuou a entrega do pedido
+						if(flagFinalAutomacao == False):
+							# Carrega os timestamps para comparacao
+							d = datetime.datetime.strptime(dataHoraRecebida, '%d-%b-%Y %H:%M:%S')
+							dataHoraRecebidaTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
+							
+							d = datetime.datetime.now().strftime('%d-%b-%Y %H:%M:%S')
+							dataHoraAtualTimestamp = time.mktime(datetime.datetime.strptime(d, '%d-%b-%Y %H:%M:%S').timetuple())
+							
+							# Verifica se deve tomar acao (envio de email e liberacao da automacao) ou somente gravar no BD
+							if((dataHoraAtualTimestamp - dataHoraRecebidaTimestamp) < TEMPO_MINIMO_ENVIO_EMAIL):
+								# Reseta a flag de Envio de email
+								flagEnviaEmail = False
+								
+								# Seta a flag de tratamento da automacao
+								flagAcionaAutomacao = True
+								
+								# Reseta a flag
+								flagVerificaEmail = False
+								
+							else:
+								print('Atualiza cliente')
+								print('Gravando data/hora: %s' % dataHoraRecebida)
+								print('Gravando valor: %s' % valorRecebidoTemp)
+								print('Gravando email: %s' % emailRecebido)
+								print('Gravando ID transacao: %s' % trnIdRecebido)
+								
+								# Atualiza o saldo
+								saldoAtual = str(ast.literal_eval(ultimoSaldo[0]) - ast.literal_eval(valorRecebidoTemp))
+								
+								# Atualiza no BD
+								c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido), (eventoRecebido, valorRecebidoTemp, saldoAtual, dataHoraRecebida, trnIdRecebido))
 
-						# Commit
-						connection.commit()
-						
-						# Carrega o texto para enviar o email
-						textoEnviaMsg = 'Parabens, seu pedido de ' + dataHoraRecebida + ' foi processado com sucesso!\n\nSeu saldo disponivel e: R$ ' + saldoAtual
-						
-						# Carrega os timestamps para comparacao
-						d = datetime.datetime.strptime(dataHoraRecebida, '%d-%b-%Y %H:%M:%S')
-						dataHoraRecebidaTimestamp = datetime.datetime(int(d.strftime('%Y')), int(d.strftime('%m')), int(d.strftime('%d')), int(d.strftime('%H')), int(d.strftime('%M')), int(d.strftime('%S'))).timestamp()
-						
-						d = datetime.datetime.now().strftime('%d-%b-%Y %H:%M:%S')
-						dataHoraAtualTimestamp = time.mktime(datetime.datetime.strptime(d, '%d-%b-%Y %H:%M:%S').timetuple())
-						
-						# Verifica se deve tomar acao (envio de email e liberacao da automacao) ou somente gravar no BD
-						if((dataHoraAtualTimestamp - dataHoraRecebidaTimestamp) < TEMPO_MINIMO_ENVIO_EMAIL):
+								# Commit
+								connection.commit()
+								
+								# Reseta a flag de Envio de email
+								flagEnviaEmail = False
+								
+								# Reseta a flag de tratamento da automacao
+								flagAcionaAutomacao = False
+								
+								# Seta a flag
+								flagVerificaEmail = True
+							
+						else:
+							print('Atualiza cliente')
+							print('Gravando data/hora: %s' % dataHoraRecebida)
+							print('Gravando valor: %s' % valorRecebidoTemp)
+							print('Gravando email: %s' % emailRecebido)
+							print('Gravando ID transacao: %s' % trnIdRecebido)
+							
+							# Atualiza o saldo
+							saldoAtual = str(ast.literal_eval(ultimoSaldo[0]) - ast.literal_eval(valorRecebidoTemp))
+							
+							# Atualiza no BD
+							c.execute('''UPDATE Cadastro SET UltimoEvento = ?, ValorOperacao = ?, Saldo = ?, UltimaAtualizacao = ?, UltimoIdTRN = ? where Email = "%s"''' % (emailRecebido), (eventoRecebido, valorRecebidoTemp, saldoAtual, dataHoraRecebida, trnIdRecebido))
+
+							# Commit
+							connection.commit()
+							
+							# Carrega o texto para enviar o email
+							textoEnviaMsg = 'Parabens, seu pedido de ' + dataHoraRecebida + ' foi processado com sucesso!\n\nSeu saldo disponivel e: R$ ' + saldoAtual
+							
 							# Seta a flag de Envio de email
 							flagEnviaEmail = True
 							
-							# Seta a flag de tratamento da automacao
-							flagAcionaAutomacao = True
+							# Reseta a flag de tratamento da automacao
+							flagAcionaAutomacao = False
 							
-							# Reseta a flag
-							flagVerificaEmail = False
-							
-						else:
 							# Seta a flag
 							flagVerificaEmail = True
 
@@ -538,6 +603,7 @@ def CapturaEmail():
 	global ultimaDataBD
 	global diaConsultaEmail
 	global flagVerificaEmail
+	global flagFinalAutomacao
 	
 	global eventoRecebido
 	global dataHoraRecebida
@@ -572,8 +638,8 @@ def CapturaEmail():
 	
 	# Loop
 	while(True):
-		# Aguarda 2 segundos
-		time.sleep(2)
+		# Aguarda 1 segundo
+		time.sleep(1)
 		
 		# Verifica se pode verificar os emails
 		if(flagVerificaEmail == True):
@@ -687,10 +753,13 @@ def CapturaEmail():
 								# Separa o texto do conteudo do email
 								textoRecebido = body.split()
 								
+								# Inicia a variavel
+								statusDistanciaPedido = False
+								
 								# Varre todas as palavras
 								for posicaoPalavra in range(len(textoRecebido)):
 									# Verifica se encontrou no email a LAT/LONG
-									if(('-2' in textoRecebido[posicaoPalavra]) and (flagCorpoEmail == False)):
+									if((('-2' in textoRecebido[posicaoPalavra]) or('--' in textoRecebido[posicaoPalavra])) and (flagCorpoEmail == False)):
 										# Seta a flag e salva o local
 										flagCorpoEmail = True
 										latLongRecebida = textoRecebido[posicaoPalavra] + ' ' + textoRecebido[posicaoPalavra+1]
@@ -745,6 +814,7 @@ def CapturaEmail():
 									
 								# Ajusta as flags
 								flagVerificaEmail = False
+								flagFinalAutomacao = False
 								flagGravaBD = True
 								
 						elif('Grava local' in mail['subject']):
@@ -863,8 +933,12 @@ def EnviaEmail():
 
 def TrataPedido():
 	global flagAcionaAutomacao
+	global flagFinalAutomacao
 	global contadorPulsosSensorFluxo
 	global flagPulsoSensorFluxo
+	global flagGravaBD
+	global flagPiscaLed
+	global estadoPiscaLed
 	
 	# Inicializa os estados
 	estadoGeral = ESTADO_INICIO
@@ -877,17 +951,18 @@ def TrataPedido():
 	while(True):
 		# Verifica se deve enviar um email
 		if(flagAcionaAutomacao == True):
-			print('\nLiberando automacao...')
-			
 			# Verifica o estado da maquina geral
 			if(estadoGeral == ESTADO_INICIO):
-				print('PISCA O LED')
+				print('\nLiberando automacao...')
+				print('\nPISCA O LED')
 				print('DESLIGA A BOMBA')
 				print('BOTAO DESACIONADO')
 				
 				# Ajusta os estados
 				estadoLed = PISCA_LED
 				estadoBomba = DESLIGA_BOMBA
+				flagPiscaLed = True
+				estadoPiscaLed = LIGA_LED
 				
 				# Carrega proximo estado
 				estadoGeral = VERIFICA_BOTAO
@@ -895,7 +970,7 @@ def TrataPedido():
 			elif(estadoGeral == VERIFICA_BOTAO):
 				# Verifica o botao
 				if(estadoBotao == BOTAO_ACIONADO):
-					print('BOTAO ACIONADO')
+					print('\nBOTAO ACIONADO')
 					print('ACENDE O LED')
 					print('LIGA A BOMBA')
 					print('VERIFICA O FLUXO')
@@ -909,6 +984,7 @@ def TrataPedido():
 					
 					# Zera o contador e reseta a flag
 					contadorPulsosSensorFluxo = 0
+					contadorPulsosSensorFluxoAnterior = 0
 					flagPulsoSensorFluxo = False
 					
 				elif(estadoBotao == BOTAO_DESACIONADO):
@@ -918,7 +994,7 @@ def TrataPedido():
 			elif(estadoGeral == VERIFICA_FLUXO):
 				# Verifica o fluxo
 				if(estadoSensorFluxo == PARA_CARGA):
-					print('FLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
+					print('\nFLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
 					print('APAGA O LED')
 					print('DESLIGA A BOMBA')
 					
@@ -930,7 +1006,9 @@ def TrataPedido():
 					estadoGeral = ESTADO_FINAL
 					
 				elif(estadoSensorFluxo == LIBERA_CARGA):
-					print('FLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
+					if(contadorPulsosSensorFluxo != contadorPulsosSensorFluxoAnterior):
+						contadorPulsosSensorFluxoAnterior = contadorPulsosSensorFluxo
+						print('FLUXO: %d PULSOS' % contadorPulsosSensorFluxo)
 					
 					# Mantem o estado
 					estadoGeral = VERIFICA_FLUXO
@@ -938,12 +1016,15 @@ def TrataPedido():
 			elif(estadoGeral == ESTADO_FINAL):
 				print('\nFinal do processo da automacao!!!')
 				
+				# Seta a flag
+				flagFinalAutomacao = True
+				
 				# Reseta a flag
 				flagAcionaAutomacao = False
-			
-				# Seta a flag
-				flagVerificaEmail = True
 				
+				# Seta a flag
+				flagGravaBD = True
+
 				# Carrega proximo estado
 				estadoGeral = ESTADO_INICIO
 
@@ -965,18 +1046,46 @@ def TrataPedido():
 ##############################################################
 
 def TrataEstadoLed(recebeEstadoLed):
+	global flagPiscaLed
+	global estadoPiscaLed
+	
 	# Verifica o estado do led
-	if(recebeEstadoLed == DESLIGA):
+	if(recebeEstadoLed == DESLIGA_LED):
 		# Reseta o estado do led
 		gpio.output(PINO_ACENDE_LED, gpio.LOW)
 		
-	elif(recebeEstadoLed == LIGA):
+	elif(recebeEstadoLed == LIGA_LED):
 		# Seta o estado do led
 		gpio.output(PINO_ACENDE_LED, gpio.HIGH)
 		
-	elif(recebeEstadoLed == PISCA):
-		# Seta/Reseta o estado do led  @@
-		gpio.output(PINO_ACENDE_LED, gpio.LOW)
+	elif(recebeEstadoLed == PISCA_LED):
+		# Verifica se deve reiniciar o timer
+		if(flagPiscaLed == True):
+			# Zera a flag
+			flagPiscaLed = False
+			
+			# Carrega e incia o timer
+			timerPiscaLed = threading.Timer(TEMPO_BLINK_LED, SetaFlagPiscaLed)
+			timerPiscaLed.start()
+			
+			# Verifica se deve desligar o led
+			if(estadoPiscaLed == DESLIGA_LED):
+				print('APAGA O LED')
+				
+				# Reseta o estado do led
+				gpio.output(PINO_ACENDE_LED, gpio.LOW)
+				
+				# Altera o estado
+				estadoPiscaLed = LIGA_LED
+				
+			elif(estadoPiscaLed == LIGA_LED):
+				print('ACENDE O LED')
+				
+				# Seta o estado do led
+				gpio.output(PINO_ACENDE_LED, gpio.HIGH)
+				
+				# Altera o estado
+				estadoPiscaLed = DESLIGA_LED
 
 
 ##############################################################
@@ -985,11 +1094,11 @@ def TrataEstadoLed(recebeEstadoLed):
 
 def TrataEstadoBomba(recebeEstadoBomba):
 	# Verifica o estado da bomba
-	if(recebeEstadoBomba == DESLIGA):
+	if(recebeEstadoBomba == DESLIGA_BOMBA):
 		# Reseta o estado da bomba
 		gpio.output(PINO_CONTROLE_BOMBA, gpio.LOW)
 		
-	elif(recebeEstadoBomba == LIGA):
+	elif(recebeEstadoBomba == LIGA_BOMBA):
 		# Seta o estado da bomba
 		gpio.output(PINO_CONTROLE_BOMBA, gpio.HIGH)
 
@@ -999,8 +1108,13 @@ def TrataEstadoBomba(recebeEstadoBomba):
 ##############################################################
 
 def TrataEstadoBotao():
+	global interrupcaoTeclado
+	
 	# Verifica se o botao esta pressionado
-	if(gpio.input(PINO_BOTAO) == False):
+	if((gpio.input(PINO_BOTAO) == False) or (interrupcaoTeclado == 'b')):
+		# Reseta a variavel
+		interrupcaoTeclado = ''
+		
 		# Informa o estado
 		enviaEstadoBotao = BOTAO_ACIONADO
 		
@@ -1017,20 +1131,7 @@ def TrataEstadoBotao():
 
 def TrataEstadoSensorFluxo():
 	global contadorPulsosSensorFluxo
-	global flagPulsoSensorFluxo
 	
-	# Verifica se o sensor recebeu pulso
-	if(gpio.input(PINO_SENSOR_FLUXO) == False):
-		# Seta a flag
-		flagPulsoSensorFluxo = True
-		
-	elif((gpio.input(PINO_SENSOR_FLUXO) == True) and (flagPulsoSensorFluxo == True)):
-		# Reseta a flag
-		flagPulsoSensorFluxo = False
-		
-		# Incrementa o contador
-		contadorPulsosSensorFluxo += 1
-		
 	# Verifica se ja encheu
 	if(contadorPulsosSensorFluxo >= PULSOS_500ML):
 		# Informa o estado
@@ -1041,6 +1142,28 @@ def TrataEstadoSensorFluxo():
 		enviaEstadoSensorFluxo = LIBERA_CARGA
 		
 	return enviaEstadoSensorFluxo
+
+
+##############################################################
+## Funcao que trata o sensor de fluxo
+##############################################################
+
+def TrataSensorFluxo():
+	global contadorPulsosSensorFluxo
+	global flagPulsoSensorFluxo
+	
+	while(True):
+		# Verifica se o sensor recebeu pulso
+		if((gpio.input(PINO_SENSOR_FLUXO) == False) and (flagPulsoSensorFluxo == True)):
+			# Reseta a flag
+			flagPulsoSensorFluxo = False
+			
+			# Incrementa o contador
+			contadorPulsosSensorFluxo += 1
+			
+		elif(gpio.input(PINO_SENSOR_FLUXO) == True):
+			# Seta a flag
+			flagPulsoSensorFluxo = True
 
 
 ##############################################################
@@ -1094,6 +1217,20 @@ def InicializaIOs():
 	gpio.output(PINO_ACENDE_LED, gpio.LOW)
 
 
+##############################################################
+## Funcao de debug pelo teclado
+##############################################################
+
+def Debug():
+	global interrupcaoTeclado
+	
+	print('Inicia thread de interrupcao pelo teclado')
+	
+	while(True):
+		interrupcaoTeclado = input("")
+		print('Interrupcao teclado: %s' % interrupcaoTeclado)
+
+
 ##########################################
 ## Main
 ##########################################
@@ -1115,4 +1252,13 @@ EnviaEmailThread.start()
 
 TrataPedidoThread = threadTrataPedido()
 TrataPedidoThread.start()
+
+TrataSensorFluxoThread = threadTrataSensorFluxo()
+TrataSensorFluxoThread.start()
+
+# @@
+DebugThread = threadDebug()
+DebugThread.start()
+
+
 
